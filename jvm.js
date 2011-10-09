@@ -1,6 +1,7 @@
 var runtime;
 
-function MethodProxy(method, constant_pool, obj, args) {
+function MethodProxy(class_name, method, constant_pool, obj, args) {
+//	console.log('-----> '+class_name+'->'+method.name+method.descriptor);
   function getValueCategory(value) {
     return value.type === "D" || value.type === "J" ? 2 : 1;
   }
@@ -24,11 +25,13 @@ function MethodProxy(method, constant_pool, obj, args) {
   }
 
   var methodCode = method.find_attribute("Code");
-  var exceptionTable = methodCode.exception_table;
+  var isNative = "ACC_NATIVE" in method.access_flags;
+  
+  var exceptionTable = (methodCode == null) ? null : methodCode.exception_table;
   var isStatic = "ACC_STATIC" in method.access_flags;
   var argumentDescriptors = getArgumentsFromDescriptor(method.descriptor);
 
-  var bytecode = methodCode.code;
+  var bytecode = (methodCode == null) ? null : methodCode.code;
   var stack = [];
   var locals = [];
   if (!isStatic) {
@@ -44,29 +47,37 @@ function MethodProxy(method, constant_pool, obj, args) {
   var pc = 0, lastKnownPc;
   var wideFound = false;
 
-  this.execute = function() {
-    try {
-      var limit = 30000;
-      while (this.step()) {
-        if (--limit < 0) { throw "too many steps"; }
-      }
-      return stack.pop();
-    } catch (ex) {
-      if (ex instanceof MethodExecutionException && ex.nativeException) {
-        throw ex.nativeException.$self;
-      } else {
-        throw ex;
-      }
-    }
-  };
-
+  if (!isNative) {
+	  this.execute = function() {
+		  var limit = 30000;
+		  while (this.step()) {
+			if (--limit < 0) { throw "too many steps"; }
+		  }
+		  return stack.pop();
+	  };
+  } else {
+    this.execute = function(){
+		var exec = getNative(class_name, method.name);
+		if (exec == null) {
+			if (class_name === "java/lang/Throwable" ||
+			class_name === "java/lang/Object") {
+				throw "Can not find native method " + method.name + ", for class "+class_name;
+			} 
+			var ex = runtime.newexception("java/lang/UnsatisfiedLinkError");
+			throw new MethodExecutionException("Exception", ex);
+		} else {
+			return exec(null,obj);
+		}
+	}
+  }
+   
   this.step = function() {
-    var raiseExceptionCookie = {};
+//    var raiseExceptionCookie = {};
 
     function validateArrayref(arrayref) {
       if (arrayref === null) {
         raiseException("java/lang/NullPointerException");
-      }
+      } 
     }
 
     function validateArrayrefAndIndex(arrayref, index) {
@@ -78,10 +89,16 @@ function MethodProxy(method, constant_pool, obj, args) {
 
     function raiseException(typeName) {
       var ex = runtime.newexception(typeName);
-      processThrow(ex);
+	  throw new MethodExecutionException("Exception", ex);
+      //processThrow(ex);
     }
 
-    function processThrow(objectref) {
+    //function processThrow(objectref) {
+	function processThrow(e) {
+		if (!(e instanceof MethodExecutionException)){
+			throw "Can not processThrow exception type is not expected";
+		}
+	var objectref = e.nativeException;
       // check table
       var handler;
       for (var i = 0, l = exceptionTable.length; i < l; ++i) {
@@ -95,13 +112,14 @@ function MethodProxy(method, constant_pool, obj, args) {
       if (handler) {
         stack.push(objectref);
         pc = exceptionTable[i].handler_pc;
-        throw raiseExceptionCookie;
+//        throw raiseExceptionCookie;
       } else {
-        if (!("stackTrace" in objectref)) {
-          objectref.stackTrace = [];
-        }
-        objectref.stackTrace.push({method: method, pc: lastKnownPc});
-        throw new MethodExecutionException("Exception", objectref);
+		throw e;
+//        if (!("stackTrace" in objectref)) {
+//          objectref.stackTrace = [];
+//        }
+//        objectref.stackTrace.push({method: method, pc: lastKnownPc});
+        //throw new MethodExecutionException("Exception", objectref);
       }
     }
 
@@ -175,14 +193,34 @@ function MethodProxy(method, constant_pool, obj, args) {
     function instanceOf(objectref, type) {
       return runtime.instanceof_(objectref, type) ? 1 : 0;
     }
-
+	function debugLocals(){
+		for (var localIdx in locals) {
+			var local = locals[localIdx];
+			if (local instanceof Object && '$factory' in local) {
+				console.debug('  local_'+localIdx+'='+local.$factory.className);
+			} else {
+				console.debug('  local_'+localIdx+'='+local);
+			}
+		}
+	}
+	function debugStack(){
+		for (var stackIdx in stack) {
+			var st = stack[stackIdx];
+			if (st instanceof Object && '$factory' in st) {
+				console.debug('  stack_'+stackIdx+'='+st.$factory.className);
+			} else {
+				console.debug('  stack_'+stackIdx+'='+st);
+			}
+		}
+	}
     lastKnownPc = pc;
 
-    try {
       var op = bytecode[pc++];
-      var jumpToAddress = null;
-     // log("OP="+ op + "; CP=" + (pc-1) + "; STACK=" + uneval(stack) + "; LOCALS=" + uneval(locals));
-
+      var jumpToAddress = null;	  
+      console.debug("method: "+class_name+"->"+method.name+method.descriptor+", OP="+ op + "; CP=" + (pc-1)+ "; "+jvm_instr[op]);
+	  debugLocals();
+	  debugStack();
+	try { 
 switch (op) {
 case 0: // (0x00) nop
   break;
@@ -298,7 +336,7 @@ case 53: // (0x35) saload
   var index = stack.pop();
   var arrayref = stack.pop();
   validateArrayrefAndIndex(arrayref, index);
-  stack.push(arrayref.value[index.value]);
+  stack.push(arrayref[index.value]);
   break;
 case 54: // (0x36) istore
 case 55: // (0x37) lstore
@@ -355,7 +393,7 @@ case 86: // (0x56) sastore
   var index = stack.pop();
   var arrayref = stack.pop();
   validateArrayrefAndIndex(arrayref, index);
-  arrayref.value[index.value] = convertForStore(value, arrayref.value[index.value]);
+  arrayref[index.value] = convertForStore(value, arrayref[index.value]);
   break;
 case 87: // (0x57) pop
   stack.pop();
@@ -1019,8 +1057,9 @@ case 190: // (0xbe) arraylength
   break;
 case 191: // (0xbf) athrow
   var objectref = stack.pop();
-  validateNotNull(objectref);
-  processThrow(objectref);
+  validateNonNull(objectref);
+  throw new MethodExecutionException("Code exception",objectref);
+  //processThrow(objectref);
   break;
 case 192: // (0xc0) checkcast
   var index = (bytecode[pc] << 8) | bytecode[pc + 1];
@@ -1038,12 +1077,12 @@ case 193: // (0xc1) instanceof
   break;
 case 194: // (0xc2) monitorenter
   var objectref = stack.pop();
-  validateNotNull(objectref);
+  validateNonNull(objectref);
   monitorEnter(objectref);
   break;
 case 195: // (0xc3) monitorexit
   var objectref = stack.pop();
-  validateNotNull(objectref);
+  validateNonNull(objectref);
   monitorExit(objectref);
   break;
 case 196: // (0xc4) wide
@@ -1090,26 +1129,27 @@ default:
   throw "invalid operation " + op + " @" + pc;
 }
 
-      if (jumpToAddress !== null) {
-        pc = jumpToAddress;
-      }
-    } catch(ex) {
-      if (ex === raiseExceptionCookie) {
-        return true; // skip scheduled exception
-      }
-      log(ex.toString());
-      if (typeof ex === "object" && "nativeException" in ex) {
-        processThrow(ex.nativeException);
-      } else {
-        if (ex instanceof MethodExecutionException) {
-          throw ex;
-        }
-        throw new MethodExecutionException(ex.toString());
-      }
-    }
-
-    return true;
+		if (jumpToAddress !== null) {
+			pc = jumpToAddress;
+		}
+		return true;
+	} catch (e){
+		if (e instanceof MethodExecutionException){
+			processThrow(e);
+		} else {
+			throw e;
+		}
+	}
   };
+}
+var natives = {};
+function getNative(className, methodName) {
+	var jniFunc = "Java_"+className.replace(/\//g, "_") + "_" + methodName;
+	if (jniFunc in natives) {
+		return natives[jniFunc];
+	} else {
+		return null;
+	}
 }
 
 var factories = {};
@@ -1119,7 +1159,7 @@ function getFactory(className) {
     return factories[className];
   }
 
-  try {
+  //try {
     var searchLocations = ["."];
     if (getFactory.searchLocations) {
       searchLocations = getFactory.searchLocations;
@@ -1137,8 +1177,10 @@ function getFactory(className) {
       try {
         var resourceUrl = searchLocations[i] + "/" + filePath;
         data = loadFile(resourceUrl);
-        log("Class " + className + " was found at " + resourceUrl + "\n");
-        break;
+		if (data != null) {
+			log("Class " + className + " was found at " + resourceUrl + "\n");
+			break;
+		}
       } catch(ex) {
         // failed, trying again
       }
@@ -1152,15 +1194,12 @@ function getFactory(className) {
 
     factories[className] = factory;
 
-    factory.superFactory = getFactory(classFile.super_class.name);
-
-    if ("<clinit>" in factory.statics) {
-      factory.statics["<clinit>"]();
+	if (className != "java/lang/Object") {
+		factory.superFactory = getFactory(classFile.super_class.name);
+	}
+    if ("<clinit>()V" in factory.statics) {
+      factory.statics["<clinit>()V"]();
     }
-
-  } catch (ex) {
-    throw "Unable to load '" + className + "' class: " + ex;
-  }
 
   return factory;
 }
@@ -1179,9 +1218,16 @@ function ClassFactory(classFile) {
     for (var i = 0, l = classFile.methods.length; i < l; ++i) {
       if (("ACC_STATIC" in classFile.methods[i].access_flags)) { continue; }
       (function(method) {
-        obj[method.name] = function() {
-          var vm = new MethodProxy(method, classFile.constant_pool, obj, arguments);
-          return vm.execute();
+		var fullMethodName = method.name+method.descriptor;
+        obj[fullMethodName] = function() {
+			var vm = new MethodProxy(classFile.this_class.name, method, classFile.constant_pool, obj, arguments);
+			//console.log("class: "+classFile.this_class.name+" , method: "+method.name);
+		try {
+			return vm.execute();
+		} catch (e) {
+			console.trace(e);
+			throw e;
+		}
         };
       })(classFile.methods[i]);
     }
@@ -1193,23 +1239,47 @@ function ClassFactory(classFile) {
   for (var i = 0, l = classFile.methods.length; i < l; ++i) {
     if (!("ACC_STATIC" in classFile.methods[i].access_flags)) { continue; }
     (function(method) {
-      statics[method.name] = function() {
-        var vm = new MethodProxy(method, classFile.constant_pool, null, arguments);
-        return vm.execute();
-      };
+		var fullMethodName = method.name+method.descriptor;
+      statics[fullMethodName] = function() {
+        var vm = new MethodProxy(classFile.this_class.name, method, classFile.constant_pool, null, arguments);
+		console.log("class: "+classFile.this_class.name+" , method: "+method.name);
+		try {
+			return vm.execute();
+		} catch (e) {
+			console.trace(e);
+			if (e instanceof MethodExecutionException){
+				var fullMethodName = method.name+method.descriptor;
+				if (fullMethodName == "main([Ljava/lang/String;)V") {
+					var objref = e.nativeException;
+					objref['printStackTrace()V'].apply(objref, []);
+				} else {		
+					throw e;
+				}
+			} else {
+				throw e;
+			}
+		}
+			
+		};
     })(classFile.methods[i]);
+  }
+  var staticsFields = [];
+  for (var i = 0, l = classFile.fields.length; i < l; ++i) {
+    if (!("ACC_STATIC" in classFile.fields[i].access_flags)) { continue; }
+		staticsFields.push(classFile.fields[i].name);			
   }
 
   var methods = [], fields = [], interfaces = [];
   for (var i = 0, l = classFile.methods.length; i < l; ++i) {
     if (("ACC_STATIC" in classFile.methods[i].access_flags) || ("ACC_PRIVATE" in classFile.methods[i].access_flags)) { continue; }
-    methods.push(classFile.methods[i].name);
+    methods.push(classFile.methods[i].name+classFile.methods[i].descriptor);
   }    
   for (var i = 0, l = classFile.fields.length; i < l; ++i) {
     if (("ACC_STATIC" in classFile.fields[i].access_flags) || ("ACC_PRIVATE" in classFile.fields[i].access_flags)) { continue; }
     fields.push(classFile.fields[i].name);
   }    
 
+  this.staticsFields = staticsFields;
   this.statics = statics;
   this.create = create;
   this.instanceMethods = methods;
@@ -1291,14 +1361,14 @@ function buildVirtualTable(object) {
 runtime = {
   getstatic: function(field) {
     var factory = getFactory(field.class_.name);
-    if (!(field.name_and_type.name in factory.statics)) {
+    if (!(field.name_and_type.name in factory.staticsFields)) {
       throw "Static field " + field.class_.name + ":" + field.name_and_type.name + " not found";
     }
-    return factory.statics[field.name_and_type.name];
+    return factory.staticsFields[field.name_and_type.name];
   },
   putstatic: function(field, value) {
     var factory = getFactory(field.class_.name);
-    factory.statics[field.name_and_type.name] = value;
+    factory.staticsFields[field.name_and_type.name] = value;
   },
   getfield: function(object, field) {
     object = normalizeObject(object, field.class_.name);
@@ -1320,32 +1390,36 @@ runtime = {
   },
   invokestatic: function(method, args) {
     var factory = getFactory(method.class_.name);
-    if (!(method.name_and_type.name in factory.statics)) {
+	var fullMethodName = method.name_and_type.name+method.name_and_type.descriptor;
+    if (!(fullMethodName in factory.statics)) {
       throw "Static method " + method.class_.name + ":" + method.name_and_type.name + " not found";
     }
-    return factory.statics[method.name_and_type.name].apply(null, args);
+    return factory.statics[fullMethodName].apply(null, args);
   },
   invokespecial: function(object, method, args) {
     object = normalizeObject(object, method.class_.name);
-    if (!(method.name_and_type.name in object)) {
+	var fullMethodName = method.name_and_type.name+method.name_and_type.descriptor;
+    if (!(fullMethodName in object)) {
       throw "Special method " + method.class_.name + ":" + method.name_and_type.name + " not found";
     }
-    var result = object[method.name_and_type.name].apply(object, args);
+    var result = object[fullMethodName].apply(object, args);
     return result;
   },
   invokevirtual: function(object, method, args) {
     var object = "$self" in object ? object.$self : object;
-    if (!(method.name_and_type.name in object)) {
+	var fullMethodName = method.name_and_type.name+method.name_and_type.descriptor;
+    if (!(fullMethodName in object)) {
       throw "Method " + method.class_.name + ":" + method.name_and_type.name + " not found";
     }
-    return object[method.name_and_type.name].apply(object, args);
+    return object[fullMethodName].apply(object, args);
   },
   invokeinterface: function(object, method, args) {
     var object = "$self" in object ? object.$self : object;
-    if (!(method.name_and_type.name in object)) {
+	var fullMethodName = method.name_and_type.name+method.name_and_type.descriptor;
+    if (!(fullMethodName in object)) {
       throw "Interface method " + method.class_.name + ":" + method.name_and_type.name + " not found";
     }
-    return object[method.name_and_type.name].apply(object, args);
+    return object[fullMethodName].apply(object, args);
   },
   new_: function(class_) {
     var factory = getFactory(class_.name);
@@ -1366,8 +1440,9 @@ runtime = {
   },
   newexception: function(typeName) {
     var object = this.new_({name: typeName});
-    this.invokespecial(object, {class_:typeName, name_and_type: {name: "<init>", description: "()V"}}, []);
+    this.invokespecial(object, {class_:typeName, name_and_type: {name: "<init>", descriptor: "()V"}}, []);
     return object;
   }
 };
 
+var jvm_instr = ['nop','aconst_null','iconst_m1','iconst_0','iconst_1','iconst_2','iconst_3','iconst_4','iconst_5','lconst_0','lconst_1','fconst_0','fconst_1','fconst_2','dconst_0','dconst_1','bipush','sipush','ldc','ldc_w','ldc2_w','iload','lload','fload','dload','aload','iload_0','iload_1','iload_2','iload_3','lload_0','lload_1','lload_2','lload_3','fload_0','fload_1','fload_2','fload_3','dload_0','dload_1','dload_2','dload_3','aload_0','aload_1','aload_2','aload_3','iaload','laload','faload','daload','aaload','baload','caload','saload','istore','lstore','fstore','dstore','astore','istore_0','istore_1','istore_2','istore_3','lstore_0','lstore_1','lstore_2','lstore_3','fstore_0','fstore_1','fstore_2','fstore_3','dstore_0','dstore_1','dstore_2','dstore_3','astore_0','astore_1','astore_2','astore_3','iastore','lastore','fastore','dastore','aastore','bastore','castore','sastore','pop','pop2','dup','dup_x1','dup_x2','dup2','dup2_x1','dup2_x2','swap','iadd','ladd','fadd','dadd','isub','lsub','fsub','dsub','imul','lmul','fmul','dmul','idiv','ldiv','fdiv','ddiv','irem','lrem','frem','drem','ineg','lneg','fneg','dneg','ishl','lshl','ishr','lshr','iushr','lushr','iand','land','ior','lor','ixor','lxor','iinc','i2l','i2f','i2d','l2i','l2f','l2d','f2i','f2l','f2d','d2i','d2l','d2f','i2b','i2c','i2s','lcmp','fcmpl','fcmpg','dcmpl','dcmpg','ifeq','ifne','iflt','ifge','ifgt','ifle','if_icmpeq','if_icmpne','if_icmplt','if_icmpge','if_icmpgt','if_icmple','if_acmpeq','if_acmpne','goto','jsr','ret','tableswitch','lookupswitch','ireturn','lreturn','freturn','dreturn','areturn','return','getstatic','putstatic','getfield','putfield','invokevirtual','invokespecial','invokestatic','invokeinterface','xxxunusedxxx1','new','newarray','anewarray','arraylength','athrow','checkcast','instanceof','monitorenter','monitorexit','wide','multianewarray','ifnull','ifnonnull','goto_w','jsr_w','breakpoint'];

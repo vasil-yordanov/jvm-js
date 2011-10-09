@@ -1,7 +1,7 @@
 var nextLockId = 0;
 
 function addFactory(description) {  
-  factories[description.className] = description;
+  //factories[description.className] = description;
 }
 
 addFactory({

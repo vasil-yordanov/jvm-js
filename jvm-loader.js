@@ -529,7 +529,8 @@ function loadFile(classUrl) {
   request.send();
 
   if (request.status != 200 && request.status != 0) {
-    throw "File " + classUrl + " is not available: " + request.statusText;
+    console.debug("File " + classUrl + " is not available: " + request.statusText);
+	return null;
   }
 
   var data = [];

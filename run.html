@@ -4,22 +4,25 @@
 <script type="text/javascript" src="jvm-loader.js"></script>
 <script type="text/javascript" src="jvm.js"></script>
 <script type="text/javascript" src="jvm-lib.js"></script>
+<script type="text/javascript" src="jvm-natives.js"></script>
 <script type="text/javascript" src="jar-reader.js"></script>
 </head>
 <body>
 <div>
   <select id="code">
+	 <option>TestExc1</option>
      <option>Hello</option>
      <option>Bottles</option>
      <option>ZeroDiv</option>
      <option>ZeroDivCatch</option>
      <option>Class1</option>
      <option>TestJar</option>
-     <option>Gen1</option>
+     <option>Gen1</option>	 
   </select> <button id="run">Run</button>
 </div>
 <script type="text/javascript">
 getFactory.searchLocations = [
+  "sandbox/jar",
   "sandbox/simple", 
   loadJarFile("sandbox/jar/testjar.jar"),
   "sandbox/generics"
@@ -34,7 +37,7 @@ function run() {
   
   
   var factory = getFactory(className);
-  factory.statics.main([]);
+  factory.statics['main([Ljava/lang/String;)V'].call(null,[]);
 }
 
 document.getElementById("run").addEventListener("click", run, false);
